@@ -1,17 +1,25 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <!-- <link rel="icon" type="image/svg+xml" href="/vite.svg" /> -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vite + TS</title>
   </head>
-  <body>
-    <div id="zoomview-container"></div>
-    <div id="overview-container"></div>
-    <audio id="audio">
-      <source src="sample.wav" type="audio/wav">
-    </audio>
+  <body >
+    <header class="container">
+      <label for="file-input">Open audio file:</label>
+      <input type="file" id="file-input" accept="audio/*"/>
+      <button id="button-download">Download Annotations</button>
+    </header>
+    <main>
+      <div id="zoomview-container"></div>
+      <div id="overview-container"></div>
+      <audio id="audio">
+        <source src="https://archive.org/download/r1291095-ANGERCD02-angerfist-mutilate/%5BANGERCD02%5D%202-02%20Angerfist%20-%20Back%20Up.mp3" type="audio/wav">
+      </audio>
+    </main>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

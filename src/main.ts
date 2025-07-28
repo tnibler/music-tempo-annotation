@@ -1,4 +1,5 @@
 import Peaks, { type PeaksOptions } from 'peaks.js';
+import './pico.min.css'
 import './style.css'
 
 type PointId = string;
@@ -9,11 +10,18 @@ interface EditPoints {
   addPoint: (id: string, opts: { time: number, draggable: boolean, kind: PointKind }) => void;
   removePoint: (id: string) => void;
   updatePoint: (id: string, opts: { time: number }) => void;
+  addSegment: (id: string, opts: { start: number, end: number, editable: boolean, text: string, color: string }) => void;
+  updateSegment: (id: string, opts: { start: number | undefined, end: number | undefined, editable: boolean | undefined, text: string | undefined, color: string | undefined }) => void;
+  removeSegment: (id: string) => void;
 }
 
+type UserPoint = (Point & { userPlaced: true });
+type AutoPoint = (Point & { userPlaced: false });
+
 type TempoRegion = {
-  userPoints: (Point & { userPlaced: true })[],
-  autoPoints: (Point & { userPlaced: false })[],
+  userPoints: UserPoint[],
+  autoPoints: AutoPoint[],
+  segmentId: string | null,
 }
 
 type Point = {
@@ -24,34 +32,65 @@ type Point = {
   region: TempoRegion,
 };
 
+type SaveFile = {
+  duration: number;
+  beats: { t: number; isTempoChange: boolean | undefined; }[];
+  regions: never[];
+};
+
 class Annotate {
   totalDuration: number;
   editPoints: EditPoints;
-  userPoints: Point[] = [];
-  autoPoints: Point[] = [];
   tempoRegions: TempoRegion[];
   pointsById: Map<string, Point>;
+  onChange: (self: Annotate) => void;
   currentUserId = 0;
   currentAutoId = 0;
+  currentSegmentId = 0;
 
-  constructor(length: number, points: EditPoints) {
-    this.totalDuration = length;
+  constructor(duration: number, points: EditPoints, onChange: (self: Annotate) => void) {
+    this.totalDuration = duration;
     this.editPoints = points;
     this.pointsById = new Map();
-    this.tempoRegions = [{ userPoints: [], autoPoints: [] }];
+    this.tempoRegions = [{ userPoints: [], autoPoints: [], segmentId: null }];
+    this.onChange = onChange;
   }
 
-  onAddPoint(time: number, kind: PointKind) {
+  loadFromSaved(saved: SaveFile) {
+    for (const beat of saved.beats) {
+      this.onAddPoint(beat.t, beat.isTempoChange ? 'tempoChange' : 'beat');
+    }
+    for (const region of this.tempoRegions) {
+      this.updateTempo(region);
+    }
+  }
+
+  toSaveFile(): SaveFile {
+    const beats = this.tempoRegions.flatMap((r) =>
+      r.userPoints.map((p) => {
+        return {
+          t: p.time,
+          isTempoChange: p.kind === 'tempoChange' ? true : undefined,
+        };
+      })
+    );
+    return {
+      duration: this.totalDuration,
+      beats: beats,
+      regions: [],
+    };
+  }
+
+  onAddPoint(time: number, kind: PointKind, doUpdate: boolean = true) {
     console.assert(this.tempoRegions.length > 0);
 
     const containingRegionIdx = (() => {
-      if (this.tempoRegions[0].userPoints.length === 0 && (this.tempoRegions.length === 1 || time < this.tempoRegions[1].userPoints[0].time)) {
+      if (this.tempoRegions.length === 1) {
         return 0;
       }
       for (const [i, r] of this.tempoRegions.entries()) {
-        if (i === 0) { continue; }
-        console.assert(r.userPoints.length > 0);
-        const startOk = r.userPoints.at(0).time < time;
+        console.assert(r.userPoints.length > 0 || i === 0);
+        const startOk = i === 0 || r.userPoints[0].time < time;
         const endOk = (i == this.tempoRegions.length - 1) || time < this.tempoRegions[i + 1].userPoints.at(0)!.time;
         if (startOk && endOk) {
           return i;
@@ -62,62 +101,47 @@ class Annotate {
 
     console.assert(containingRegionIdx >= 0);
 
-    let containingRegion: TempoRegion;
+    let containingRegion: TempoRegion = this.tempoRegions[containingRegionIdx];
+    const point: UserPoint = { id: this.nextUserPointId(), time, kind, region: containingRegion, userPlaced: true as const };
+
     let insertAt = 0;
     while (insertAt < containingRegion.userPoints.length && containingRegion.userPoints[insertAt].time < time) {
       insertAt++;
     }
     if (kind === 'tempoChange') {
-      containingRegion.userPoints.splice(insertAt + 1, containingRegion.userPoints.length - insertAt - 1)
+      const removedPoints = containingRegion.userPoints.splice(insertAt, containingRegion.userPoints.length - insertAt)
+      const newRegion: TempoRegion = { userPoints: [point].concat(removedPoints), autoPoints: [], segmentId: null };
+      for (const point of newRegion.userPoints) {
+        point.region = newRegion;
+      }
+      this.tempoRegions.splice(containingRegionIdx + 1, 0, newRegion);
+      if (doUpdate) {
+        this.updateTempo(containingRegion);
+        this.updateTempo(newRegion);
+      }
     } else {
       containingRegion = this.tempoRegions[containingRegionIdx];
-      containingRegion.userPoints.splice(insertAt, 0,)
-    }
-
-    const point = { id, time, kind, region, userPlaced: true };
-
-    let region: TempoRegion;
-    if (kind == 'tempoChange') {
-      const containing = this.tempoRegions[containingRegionIdx];
-      region = {
-        userPointsStart: insertAt,
-        userPointsEnd: containing.userPointsEnd,
-        autoPointsStart: 0, autoPointsEnd: 0
-      };
-      containing.userPointsEnd = insertAt;
-      this.tempoRegions.splice(containingRegionIdx + 1, 0, region);
-    } else {
-      region = this.tempoRegions[containingRegionIdx];
-      this.autoPoints.splice(region.au)
-    }
-
-    const id = this.nextUserPointId();
-    this.userPoints.splice(insertAt, 0, point);
-    this.editPoints.addPoint(id, { time, kind, draggable: true });
-    this.pointsById.set(id, point);
-
-    // this.updateTempo(insertAt);
-
-    console.assert(this.tempoRegions.length > 0 && this.tempoRegions.length < this.userPoints.length + 1);
-    console.assert(this.tempoRegions[0].userPointsStart === 0);
-    console.assert(this.tempoRegions[0].autoPointsStart === 0);
-    console.assert(this.tempoRegions[this.tempoRegions.length - 1].userPointsEnd === this.userPoints.length);
-    console.assert(this.tempoRegions[this.tempoRegions.length - 1].autoPointsEnd === this.autoPoints.length);
-    if (this.tempoRegions.length > 0) {
-      for (let i = 1; i < this.tempoRegions.length; i++) {
-        console.assert(this.tempoRegions[i].userPointsEnd - this.tempoRegions[i].userPointsStart > 0);
-        console.assert(this.tempoRegions[i - 1].userPointsEnd == this.tempoRegions[i].userPointsStart);
-        console.assert(this.tempoRegions[i - 1].autoPointsEnd == this.tempoRegions[i].autoPointsStart);
+      containingRegion.userPoints.splice(insertAt, 0, point)
+      if (doUpdate) {
+        this.updateTempo(containingRegion)
       }
     }
+
+
+    this.editPoints.addPoint(point.id, { time, kind, draggable: true });
+    this.pointsById.set(point.id, point);
+    this.onChange(this);
   }
 
   onRemovePoint(id: string) {
     const point = this.pointsById.get(id);
-    const index = this.userPoints.indexOf(point);
-    this.userPoints.splice(index, 1);
+    const region = point?.region;
+    const index = region.userPoints.indexOf(point);
+    region?.userPoints.splice(index, 1);
+    this.pointsById.delete(id);
     this.editPoints.removePoint(point.id);
-    this.updateTempo(Math.max(Math.min(index, this.userPoints.length - 1), 0));
+    this.updateTempo(region);
+    this.onChange(this);
   }
 
   onPointMoving(id: string, toTime: number) {
@@ -130,102 +154,155 @@ class Annotate {
       console.error("tried to move auto point");
       return;
     }
-    const idx = this.userPoints.indexOf(point);
+    const regionPoints = point.region.userPoints;
+    const idx = regionPoints.indexOf(point);
     let clamped = toTime;
     console.assert(idx >= 0);
     if (idx > 0) {
-      clamped = Math.max(toTime, this.userPoints[idx - 1].time + 0.1);
+      clamped = Math.max(toTime, regionPoints[idx - 1].time + 0.1);
     }
-    if (idx < this.userPoints.length - 1) {
-      clamped = Math.min(toTime, this.userPoints[idx + 1].time - 0.1);
+    if (idx < regionPoints.length - 1) {
+      clamped = Math.min(toTime, regionPoints[idx + 1].time - 0.1);
     }
     point.time = clamped;
     this.editPoints.updatePoint(id, { time: clamped });
   }
 
   onPointMoved(id: string, toTime: number) {
+    const point = this.pointsById.get(id);
     this.editPoints.updatePoint(id, { time: toTime });
-    this.updateTempo(id);
+    this.updateTempo(point.region);
+    this.onChange(this);
   }
 
-  updateTempo(modifiedIndex: number) {
-    console.assert(modifiedIndex >= 0);
-    console.assert(modifiedIndex < this.userPoints.length);
-    let pointRangeStart = modifiedIndex;
-    while (pointRangeStart > 0 && this.userPoints[pointRangeStart - 1].kind == 'beat') {
-      pointRangeStart -= 1;
-    }
-    let pointRangeEnd = modifiedIndex;
-    while (pointRangeEnd < this.userPoints.length && this.userPoints[pointRangeStart].kind == 'beat') {
-      pointRangeEnd += 1;
-    }
-
-    const nPoints = pointRangeEnd - pointRangeStart;
-    if (nPoints <= 1) {
+  updateTempo(region: TempoRegion) {
+    const regionIdx = this.tempoRegions.indexOf(region);
+    if (region.userPoints.length <= 1) {
+      for (const ap of region.autoPoints) {
+        this.pointsById.delete(ap.id);
+        this.editPoints.removePoint(ap.id);
+      }
+      region.autoPoints = [];
+      if (region.segmentId !== null) {
+        this.editPoints.removeSegment(region.segmentId);
+        region.segmentId = null;
+      }
       return;
     }
+    let dists = [];
+    // assuming minDist is one period/beat
+    let minDist = Number.POSITIVE_INFINITY;
+    for (let i = 1; i < region.userPoints.length; i++) {
+      const dist = region.userPoints[i].time - region.userPoints[i - 1].time;
+      dists.push(dist);
+      minDist = Math.min(minDist, dist);
+    }
 
-    let maxDist = 0;
-    let cumSum = 0;
-    let firstMeanCount = 0;
-    for (let i = pointRangeStart + 1; i < pointRangeEnd; i++) {
-      const dist = this.userPoints[i].time - this.userPoints[i - 1].time;
-      if (firstMeanCount > 0) {
-        const meanSoFar = cumSum / firstMeanCount;
-        if (dist > 1.7 * meanSoFar) {
-          break;
+    const initialEstimate = (() => {
+      let sum = 0;
+      let count = 0;
+      for (const dist of dists) {
+        if (dist < minDist * 1.2) {
+          sum += dist;
+          count += 1;
         }
       }
-      cumSum += dist;
-      maxDist = Math.max(maxDist, dist);
-      firstMeanCount += 1;
-    }
-    const firstPeriodEstimate = cumSum / firstMeanCount;
-    let periodCount = firstMeanCount;
-    if (firstMeanCount < nPoints - 1) {
-      for (let i = firstMeanCount + 1; i < pointRangeEnd; i++) {
-        const dist = this.userPoints[i].time - this.userPoints[i - 1].time;
-        const periods = Math.round(dist / firstPeriodEstimate);
-        cumSum += dist;
-        periodCount += periods;
+      console.assert(count >= 1);
+      return sum / count;
+    })();
+
+    const period = (() => {
+      let sum = 0;
+      let count = 0;
+      for (const dist of dists) {
+        let periods = Math.round(dist / initialEstimate);
+        sum += dist;
+        count += periods;
       }
+      return sum / count;
+    })();
+
+    const stddev = (() => {
+      let sumSqDiff = 0;
+      let meanTempo = 60 / period;
+      let count = 0;
+      for (const dist of dists) {
+        let nPeriods = Math.round(dist / initialEstimate);
+        count += nPeriods;
+        let tempo = 60 / (dist / nPeriods);
+        sumSqDiff += Math.pow(meanTempo - tempo, 2);
+      }
+      return Math.sqrt(sumSqDiff / count);
+    })();
+
+    let autoPointsPlaced = 0;
+    if (regionIdx != this.tempoRegions.length - 1) {
+      console.assert(this.tempoRegions[regionIdx + 1].userPoints[0].kind === 'tempoChange');
     }
-    const period = cumSum / periodCount;
-    console.log(60 / period);
-    for (let point of this.autoPoints) {
-      this.editPoints.removePoint(point.id)
-    }
-    this.autoPoints = [];
-    let pi = pointRangeStart + firstMeanCount;
-    let t = this.userPoints[pi].time;
-    let pointsPlaced = 0;
-    let endTime = pointRangeEnd == this.userPoints.length ? this.totalDuration : this.userPoints[pointRangeEnd + 1].time;
-    if (pointRangeEnd != this.userPoints.length) {
-      console.assert(this.userPoints[pointRangeEnd + 1].kind === 'tempoChange');
-    }
-    while (t + period < endTime && pointsPlaced < 10000) {
-      let placeAutoPoint = false;
-      if (pi < pointRangeEnd - 1) {
-        const interval = this.userPoints[pi + 1].time - t;
-        if (interval > 1.5 * period) {
-          placeAutoPoint = true;
-        } else {
-          pi += 1;
-          t = this.userPoints[pi].time;
+    const startTime = region.userPoints[0].time;
+    const endTime = regionIdx === this.tempoRegions.length - 1 ? this.totalDuration : this.tempoRegions[regionIdx + 1].userPoints[0].time;
+    let userPointIdx = 0;
+    let t = startTime;
+    while (t + period < endTime && autoPointsPlaced < 10) {
+      const placeAutoPoint = (() => {
+        if (userPointIdx >= region.userPoints.length) {
+          if (regionIdx === this.tempoRegions.length - 1) {
+            // last region, no user points after this
+            return true;
+          } else {
+            const nextUserPoint = this.tempoRegions[regionIdx + 1].userPoints[0];
+            return Math.abs(t - nextUserPoint.time - period) / period > 0.1;
+          }
         }
+        const nextUserPoint = region.userPoints[userPointIdx];
+        return Math.abs(t - nextUserPoint.time - period) / period > 0.1;
+      })();
+      if (!placeAutoPoint) {
+        userPointIdx += 1;
       } else {
-        placeAutoPoint = true;
-      }
-      if (placeAutoPoint) {
-        const pointId = `auto` + this.currentAutoId;
-        const point: Point = { id: pointId, time: t + period, userPlaced: false };
-        this.currentAutoId += 1;
-        this.autoPoints.push(point);
-        this.editPoints.addPoint(pointId, { time: t + period, kind: 'beat', draggable: false });
         t += period;
-        pointsPlaced += 1;
+        if (autoPointsPlaced < region.autoPoints.length) {
+          const reusePoint = region.autoPoints[autoPointsPlaced];
+          reusePoint.time = t;
+          this.editPoints.updatePoint(reusePoint.id, { time: t });
+        } else {
+          const newPoint: AutoPoint = { id: this.nextAutoPointId(), region, time: t, kind: 'beat', userPlaced: false };
+          region.autoPoints.push(newPoint);
+          this.editPoints.addPoint(newPoint.id, { time: t, draggable: false, kind: 'beat' });
+          this.pointsById.set(newPoint.id, newPoint);
+        }
+        autoPointsPlaced += 1;
       }
     }
+    if (autoPointsPlaced < region.autoPoints.length) {
+      const toRemove = region.autoPoints.splice(autoPointsPlaced, region.autoPoints.length - autoPointsPlaced);
+      for (const ap of toRemove) {
+        this.pointsById.delete(ap.id);
+        this.editPoints.removePoint(ap.id);
+      }
+    }
+    const segmentColors = ["#E11845", "#87E911", "#0057E9", "#FF00BD", "#F2CA19", "#8931EF"];
+    const segmentOpts = {
+      start: startTime,
+      end: endTime,
+      text: (60 / period).toFixed(2) + " BPM (σ=" + stddev.toFixed(3) + ")",
+    };
+    if (region.segmentId !== null) {
+      this.editPoints.updateSegment(region.segmentId, segmentOpts);
+    } else {
+      region.segmentId = this.nextSegmentId();
+      this.editPoints.addSegment(region.segmentId, {
+        ...segmentOpts,
+        editable: false,
+        color: segmentColors[this.currentSegmentId % segmentColors.length]
+      });
+    }
+  }
+
+  nextSegmentId(): string {
+    const id = "segment" + this.currentSegmentId;
+    this.currentSegmentId += 1;
+    return id;
   }
 
   nextUserPointId(): string {
@@ -246,6 +323,11 @@ const zoomviewEl = document.getElementById('zoomview-container');
 if (zoomviewEl === null) {
   throw new Error('zoomviewEl is null');
 }
+const overviewEl = document.getElementById('overview-container');
+if (overviewEl === null) {
+  throw new Error('overviewEl is null');
+}
+
 
 const zoomLevels = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32].map((i) => i * 128);
 const options: PeaksOptions = {
@@ -255,7 +337,22 @@ const options: PeaksOptions = {
   },
   zoomLevels,
   overview: {
-    container: document.getElementById('overview-container')
+    container: overviewEl,
+  },
+  segmentOptions: {
+    markers: false,
+    overlay: true,
+    overlayOpacity: 0.1,
+    overlayBorderWidth: 2,
+    overlayCornerRadius: 5,
+    overlayOffset: 40,
+    overlayLabelAlign: 'left',
+    overlayLabelVerticalAlign: 'top',
+    overlayLabelPadding: 8,
+    overlayLabelColor: '#000000',
+    overlayFontFamily: 'sans-serif',
+    overlayFontSize: 14,
+    overlayFontStyle: 'normal'
   },
   mediaElement: document.getElementById('audio'),
   webAudio: {
@@ -263,104 +360,229 @@ const options: PeaksOptions = {
   }
 };
 
-Peaks.init(options, function(err, peaks) {
-  if (err || peaks === undefined) {
-    console.error('Failed to initialize Peaks instance: ' + err.message);
-    return;
-  }
-  const zoomview = peaks.views.getView('zoomview');
-  if (!zoomview) {
-    console.error("zoomview is null");
-    return;
-  }
+let peaksEvents: { keypress: (e: KeyboardEvent) => void; wheel: (e: WheelEvent) => void; resize: () => void; download: () => void; } | null = null;
 
-  const annotate = new Annotate(peaks.player.getDuration(), {
-    addPoint: (id, { time, kind, draggable }) => {
-      const color = kind === 'beat' ? '#006eb0' : '#ff0000';
-      peaks.points.add({ time, id, color, editable: draggable });
-    },
-    removePoint: (id) => {
-      peaks.points.removeById(id);
-    },
-    updatePoint: (id, { time }) => {
-      peaks.points.getPoint(id)!.update({ time });
-    }
-  });
-
-  zoomview.setWheelMode("scroll", { captureVerticalScroll: true });
-  zoomview.setWaveformDragMode("scroll");
-  peaks.on("zoomview.contextmenu", (ev) => {
-    ev.evt.preventDefault();
-  });
-  peaks.on("zoomview.click", (event) => {
-    if (event.evt.button == 2) {
-      const kind = event.evt.getModifierState("Control") ? 'tempoChange' : 'beat';
-      console.log(kind);
-      annotate.onAddPoint(event.time, kind);
-    }
-  });
-  peaks.on("points.dragmove", (event) => {
-    if (event.point.id === undefined) {
+function initPeaks(savedJson: string | undefined) {
+  Peaks.init(options, function(err, peaks) {
+    if (err || peaks === undefined) {
+      console.error('Failed to initialize Peaks instance: ' + err.message);
       return;
     }
-    annotate.onPointMoving(event.point.id, event.point.time);
-  });
-  peaks.on("points.dragend", (event) => {
-    if (event.point.id === undefined) {
+    const zoomview = peaks.views.getView('zoomview');
+    const overview = peaks.views.getView('overview');
+    if (!zoomview) {
+      console.error("zoomview is null");
       return;
     }
-    annotate.onPointMoved(event.point.id, event.point.time);
-  });
-
-  peaks.on("points.click", (event) => {
-    event.preventViewEvent();
-    if (event.evt.button == 2 && event.point.id !== undefined) {
-      annotate.onRemovePoint(event.point.id);
+    if (!overview) {
+      console.error("overview is null");
+      return;
     }
-  })
 
-
-  var isPlaying = false;
-  peaks.on("player.playing", (e) => {
-    isPlaying = true;
-  });
-  peaks.on("player.pause", (e) => {
-    isPlaying = false;
-  });
-  document.addEventListener("keypress", function(event) {
-    if (event.key == " ") {
-      if (isPlaying) {
-        peaks.player.pause();
-      } else {
-        peaks.player.play();
-      }
-    }
-  });
-  document.addEventListener("wheel", (event) => {
-    const overZoomview = event.composedPath().indexOf(zoomviewEl) >= 0;
-    const ctrlPressed = event.getModifierState("Control");
-    if (overZoomview && ctrlPressed) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-
-      if (event.deltaY > 0) {
-        // zoom in
-        const levelIdx = peaks.zoom.getZoom();
-        if (levelIdx < zoomLevels.length - 1) {
-          // const span = zoomview.pixelsToTime(zoomviewEl.clientWidth);
-          // const fromLevel = zoomLevels[levelIdx];
-          // const toLevel = zoomLevels[levelIdx + 1];
-          peaks.zoom.setZoom(levelIdx + 1);
+    const onChange = (ann: Annotate) => {
+      const save = ann.toSaveFile();
+      const filename = currentFile?.name ?? 'sample';
+      save.fileName = filename;
+      save.fileSize = currentFile?.size ?? 0;
+      window.localStorage[filename] = JSON.stringify(save);
+    };
+    const annotate = new Annotate(peaks.player.getDuration(), {
+      addPoint: (id, { time, kind, draggable }) => {
+        const color = kind === 'beat' ? '#006eb0' : '#ff0000';
+        peaks.points.add({ time, id, color, editable: draggable });
+      },
+      removePoint: (id) => {
+        peaks.points.removeById(id);
+      },
+      updatePoint: (id, { time }) => {
+        peaks.points.getPoint(id)!.update({ time });
+      },
+      addSegment: (id, opts) => {
+        peaks.segments.add({
+          id,
+          startTime: opts.start,
+          endTime: opts.end,
+          editable: opts.editable,
+          color: opts.color,
+          labelText: opts.text,
+          overlay: true,
+        });
+      },
+      updateSegment: (id, opts) => {
+        const segment = peaks.segments.getSegment(id);
+        const oopts = { startTime: opts.start, endTime: opts.end, labelText: opts.text, color: opts.color };
+        Object.keys(oopts).forEach(key => oopts[key] === undefined ? delete oopts[key] : {});
+        segment?.update(oopts);
+        if (opts.text !== undefined) {
+          // https://github.com/bbc/peaks.js/issues/563
+          for (const view of [zoomview, overview]) {
+            const shapes = view._segmentsLayer._segmentShapes;
+            for (const k of Object.keys(shapes)) {
+              if ('_segment' in shapes[k] && shapes[k]._segment === segment) {
+                shapes[k]!._label.setAttr("text", opts.text);
+                break;
+              }
+            }
+          }
         }
-      } else {
-        // zoom out
-        const levelIdx = peaks.zoom.getZoom();
-        if (levelIdx > 0) {
-          // const toLevel = zoomLevels[levelIdx - 1];
-          peaks.zoom.setZoom(levelIdx - 1);
-        }
-      }
+      },
+      removeSegment: (id) => {
+        peaks.segments.removeById(id);
+      },
+    }, onChange);
+    if (savedJson !== null && savedJson !== undefined) {
+      annotate.loadFromSaved(JSON.parse(savedJson));
     }
-  }, { capture: true, passive: false });
 
+    zoomview.setWheelMode("scroll", { captureVerticalScroll: true });
+    zoomview.setWaveformDragMode("scroll");
+    peaks.on("zoomview.contextmenu", (ev) => {
+      ev.evt.preventDefault();
+    });
+    peaks.on("zoomview.click", (event) => {
+      if (event.evt.button == 2) {
+        const kind = event.evt.getModifierState("Control") ? 'tempoChange' : 'beat';
+        annotate.onAddPoint(event.time, kind);
+      }
+    });
+    peaks.on("points.dragmove", (event) => {
+      zoomview.updateWaveform();
+      if (event.point.id === undefined) {
+        return;
+      }
+      annotate.onPointMoving(event.point.id, event.point.time);
+    });
+    peaks.on("points.dragend", (event) => {
+      if (event.point.id === undefined) {
+        return;
+      }
+      annotate.onPointMoved(event.point.id, event.point.time);
+    });
+
+    peaks.on("points.click", (event) => {
+      event.preventViewEvent();
+      if (event.evt.button == 2 && event.point.id !== undefined) {
+        annotate.onRemovePoint(event.point.id);
+      }
+    })
+
+    var isPlaying = false;
+    peaks.on("player.playing", (e) => {
+      isPlaying = true;
+    });
+    peaks.on("player.pause", (e) => {
+      isPlaying = false;
+    });
+    peaksEvents = {
+      keypress: (event: KeyboardEvent) => {
+        if (event.key == " ") {
+          if (isPlaying) {
+            peaks.player.pause();
+          } else {
+            peaks.player.play();
+          }
+        }
+      },
+      wheel: (event: WheelEvent) => {
+        const overZoomview = event.composedPath().indexOf(zoomviewEl) >= 0;
+        const ctrlPressed = event.getModifierState("Control");
+        if (overZoomview && ctrlPressed) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+
+          if (event.deltaY > 0) {
+            // zoom in
+            const levelIdx = peaks.zoom.getZoom();
+            if (levelIdx < zoomLevels.length - 1) {
+              // const span = zoomview.pixelsToTime(zoomviewEl.clientWidth);
+              // const fromLevel = zoomLevels[levelIdx];
+              // const toLevel = zoomLevels[levelIdx + 1];
+              peaks.zoom.setZoom(levelIdx + 1);
+            }
+          } else {
+            // zoom out
+            const levelIdx = peaks.zoom.getZoom();
+            if (levelIdx > 0) {
+              // const toLevel = zoomLevels[levelIdx - 1];
+              peaks.zoom.setZoom(levelIdx - 1);
+            }
+          }
+        }
+      },
+      resize: () => {
+        overview.fitToContainer();
+        zoomview.fitToContainer();
+      },
+      download: () => {
+        var a = window.document.createElement('a');
+        const json = JSON.stringify(annotate.toSaveFile());
+        a.href = window.URL.createObjectURL(new Blob([json], { type: 'text/json' }));
+        a.download = (currentFile?.name ?? 'sample') + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    };
+    window.peaks = peaks;
+  });
+}
+
+
+document.addEventListener("keypress", function(e) {
+  if (peaksEvents !== null) {
+    peaksEvents.keypress(e);
+  }
 });
+
+document.addEventListener("wheel", (event) => {
+  if (peaksEvents !== null) {
+    peaksEvents.wheel(event);
+  }
+}, { capture: true, passive: false });
+
+let debounceTimer: number | undefined = undefined;
+const resizeObserver = new ResizeObserver((entries) => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    if (peaksEvents !== null) {
+      peaksEvents.resize();
+    }
+    debounceTimer = undefined;
+  }, 50);
+});
+resizeObserver.observe(zoomviewEl);
+resizeObserver.observe(overviewEl);
+
+const audioEl = document.getElementById("audio") as HTMLAudioElement;
+function loadFile(file: File) {
+  const url = URL.createObjectURL(file);
+  currentFile = file;
+  audioEl.src = url;
+  const saved = window.localStorage[file.name];
+  initPeaks(saved);
+}
+
+const input: HTMLInputElement = document.getElementById("file-input") as HTMLInputElement;
+input.addEventListener("change", (e) => {
+  if (input.files !== null && input.files.length > 0) {
+    const file = input.files[0];
+    loadFile(file);
+  }
+});
+
+document.getElementById('button-download')?.addEventListener("click", (e) => {
+  if (peaksEvents !== null) {
+    peaksEvents.download();
+  }
+});
+
+let currentFile: File | null = null;
+if (input.files?.length > 0) {
+  loadFile(input.files[0]);
+} else {
+  initPeaks(window.localStorage['sample']);
+}
+
+
+// TODO: move markers hangs, 
+// TODO: remove event listeners on reinit peaks

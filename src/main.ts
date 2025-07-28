@@ -1,8 +1,6 @@
-import Peaks, { type PeaksOptions } from 'peaks.js';
+import Peaks, { type PeaksOptions, type SegmentOptions } from 'peaks.js';
 import './pico.min.css'
 import './style.css'
-
-type PointId = string;
 
 type PointKind = "beat" | "tempoChange";
 
@@ -10,27 +8,35 @@ interface EditPoints {
   addPoint: (id: string, opts: { time: number, draggable: boolean, kind: PointKind }) => void;
   removePoint: (id: string) => void;
   updatePoint: (id: string, opts: { time: number }) => void;
-  addSegment: (id: string, opts: { start: number, end: number, editable: boolean, text: string, color: string }) => void;
-  updateSegment: (id: string, opts: { start: number | undefined, end: number | undefined, editable: boolean | undefined, text: string | undefined, color: string | undefined }) => void;
+  addSegment: (id: string, opts: { startTime: number, endTime: number, editable: boolean, labelText: string, color: string }) => void;
+  updateSegment: (id: string, opts: { startTime?: number | undefined, endTime?: number | undefined, editable?: boolean | undefined, labelText?: string | undefined, color?: string | undefined }) => void;
   removeSegment: (id: string) => void;
 }
 
-type UserPoint = (Point & { userPlaced: true });
-type AutoPoint = (Point & { userPlaced: false });
+
+type UserPoint = {
+  id: string,
+  userPlaced: true,
+  time: number,
+  kind: PointKind,
+  region: TempoRegion,
+};
+
+type AutoPoint = {
+  id: string,
+  userPlaced: false,
+  time: number,
+  kind: PointKind,
+  region: TempoRegion,
+};
+
+type Point = UserPoint | AutoPoint;
 
 type TempoRegion = {
   userPoints: UserPoint[],
   autoPoints: AutoPoint[],
   segmentId: string | null,
 }
-
-type Point = {
-  id: string,
-  time: number,
-  kind: PointKind,
-  userPlaced: boolean,
-  region: TempoRegion,
-};
 
 type SaveFile = {
   duration: number;
@@ -135,9 +141,13 @@ class Annotate {
 
   onRemovePoint(id: string) {
     const point = this.pointsById.get(id);
-    const region = point?.region;
+    assertNotNull(point, 'point by id is null');
+    if (point.userPlaced !== true) {
+      return;
+    }
+    const region = point.region;
     const index = region.userPoints.indexOf(point);
-    region?.userPoints.splice(index, 1);
+    region.userPoints.splice(index, 1);
     this.pointsById.delete(id);
     this.editPoints.removePoint(point.id);
     this.updateTempo(region);
@@ -165,9 +175,9 @@ class Annotate {
     if (idx < regionPoints.length - 1) {
       clamped = Math.min(clamped, regionPoints[idx + 1].time - 0.1);
     } else if (regionIdx < this.tempoRegions.length - 1) {
-      clamped = Math.min(clamped, this.totalDuration);
+      clamped = Math.min(clamped, this.tempoRegions[regionIdx + 1].userPoints[0].time);
     } else {
-      clamped = Math.min(clamped, this.tempoRegions[regionIdx + 1].userPoints[0].time - 0.1);
+      clamped = Math.min(clamped, this.totalDuration - 0.1);
     }
     point.time = clamped;
     this.editPoints.updatePoint(id, { time: clamped });
@@ -175,6 +185,7 @@ class Annotate {
 
   onPointMoved(id: string, toTime: number) {
     const point = this.pointsById.get(id);
+    assertNotNull(point, 'point by id is null');
     this.editPoints.updatePoint(id, { time: toTime });
     this.updateTempo(point.region);
     this.onChange(this);
@@ -288,9 +299,9 @@ class Annotate {
     }
     const segmentColors = ["#E11845", "#87E911", "#0057E9", "#FF00BD", "#F2CA19", "#8931EF"];
     const segmentOpts = {
-      start: startTime,
-      end: endTime,
-      text: (60 / period).toFixed(2) + " BPM (σ=" + stddev.toFixed(3) + ")",
+      startTime,
+      endTime,
+      labelText: (60 / period).toFixed(2) + " BPM (σ=" + stddev.toFixed(3) + ")",
     };
     if (region.segmentId !== null) {
       this.editPoints.updateSegment(region.segmentId, segmentOpts);
@@ -324,15 +335,18 @@ class Annotate {
 
 }
 
-const zoomviewEl = document.getElementById('zoomview-container');
-if (zoomviewEl === null) {
-  throw new Error('zoomviewEl is null');
-}
-const overviewEl = document.getElementById('overview-container');
-if (overviewEl === null) {
-  throw new Error('overviewEl is null');
+function assertNotNull<T>(value: T, message: string): asserts value is NonNullable<T> {
+  if (value === null || value === undefined) {
+    throw Error(message);
+  }
 }
 
+const zoomviewEl = document.getElementById('zoomview-container');
+assertNotNull(zoomviewEl, "zoomviewEl is null");
+const overviewEl = document.getElementById('overview-container');
+assertNotNull(overviewEl, "overviewEl is null");
+const audioEl = document.getElementsByTagName("audio").namedItem("audio");
+assertNotNull(audioEl, "audioEl is null");
 
 const zoomLevels = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32].map((i) => i * 128);
 const options: PeaksOptions = {
@@ -359,7 +373,7 @@ const options: PeaksOptions = {
     overlayFontSize: 14,
     overlayFontStyle: 'normal'
   },
-  mediaElement: document.getElementById('audio'),
+  mediaElement: audioEl,
   webAudio: {
     audioContext: new AudioContext()
   }
@@ -385,10 +399,12 @@ function initPeaks(savedJson: string | undefined) {
     }
 
     const onChange = (ann: Annotate) => {
-      const save = ann.toSaveFile();
       const filename = currentFile?.name ?? 'sample';
-      save.fileName = filename;
-      save.fileSize = currentFile?.size ?? 0;
+      const save = {
+        ...ann.toSaveFile(),
+        fileName: filename,
+        fileSize: currentFile?.size ?? 0,
+      };
       window.localStorage[filename] = JSON.stringify(save);
     };
     const annotate = new Annotate(peaks.player.getDuration(), {
@@ -400,31 +416,28 @@ function initPeaks(savedJson: string | undefined) {
         peaks.points.removeById(id);
       },
       updatePoint: (id, { time }) => {
-        peaks.points.getPoint(id)!.update({ time });
+        const point = peaks.points.getPoint(id);
+        assertNotNull(point, 'point by id is null');
+        point.update({ time });
       },
       addSegment: (id, opts) => {
         peaks.segments.add({
           id,
-          startTime: opts.start,
-          endTime: opts.end,
-          editable: opts.editable,
-          color: opts.color,
-          labelText: opts.text,
           overlay: true,
+          ...opts,
         });
       },
       updateSegment: (id, opts) => {
         const segment = peaks.segments.getSegment(id);
-        const oopts = { startTime: opts.start, endTime: opts.end, labelText: opts.text, color: opts.color };
-        Object.keys(oopts).forEach(key => oopts[key] === undefined ? delete oopts[key] : {});
-        segment?.update(oopts);
-        if (opts.text !== undefined) {
+        assertNotNull(segment, 'segment by id is null');
+        segment.update(opts as SegmentOptions);
+        if (opts.labelText !== undefined) {
           // https://github.com/bbc/peaks.js/issues/563
           for (const view of [zoomview, overview]) {
-            const shapes = view._segmentsLayer._segmentShapes;
+            const shapes = (view as any)._segmentsLayer._segmentShapes;
             for (const k of Object.keys(shapes)) {
               if ('_segment' in shapes[k] && shapes[k]._segment === segment) {
-                shapes[k]!._label.setAttr("text", opts.text);
+                shapes[k]!._label.setAttr("text", opts.labelText);
                 break;
               }
             }
@@ -488,6 +501,7 @@ function initPeaks(savedJson: string | undefined) {
         }
       },
       wheel: (event: WheelEvent) => {
+        assertNotNull(zoomviewEl, "zoomviewEl is null");
         const overZoomview = event.composedPath().indexOf(zoomviewEl) >= 0;
         const ctrlPressed = event.getModifierState("Control");
         if (overZoomview && ctrlPressed) {
@@ -527,7 +541,6 @@ function initPeaks(savedJson: string | undefined) {
         document.body.removeChild(a);
       }
     };
-    window.peaks = peaks;
   });
 }
 
@@ -557,8 +570,8 @@ const resizeObserver = new ResizeObserver((entries) => {
 resizeObserver.observe(zoomviewEl);
 resizeObserver.observe(overviewEl);
 
-const audioEl = document.getElementById("audio") as HTMLAudioElement;
 function loadFile(file: File) {
+  assertNotNull(audioEl, "audioEl is null");
   const url = URL.createObjectURL(file);
   currentFile = file;
   audioEl.src = url;
@@ -581,7 +594,7 @@ document.getElementById('button-download')?.addEventListener("click", (e) => {
 });
 
 let currentFile: File | null = null;
-if (input.files?.length > 0) {
+if (input.files !== null && input.files.length > 0) {
   loadFile(input.files[0]);
 } else {
   initPeaks(window.localStorage['sample']);

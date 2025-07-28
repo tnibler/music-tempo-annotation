@@ -155,6 +155,7 @@ class Annotate {
       return;
     }
     const regionPoints = point.region.userPoints;
+    const regionIdx = this.tempoRegions.indexOf(point.region);
     const idx = regionPoints.indexOf(point);
     let clamped = toTime;
     console.assert(idx >= 0);
@@ -162,7 +163,11 @@ class Annotate {
       clamped = Math.max(toTime, regionPoints[idx - 1].time + 0.1);
     }
     if (idx < regionPoints.length - 1) {
-      clamped = Math.min(toTime, regionPoints[idx + 1].time - 0.1);
+      clamped = Math.min(clamped, regionPoints[idx + 1].time - 0.1);
+    } else if (regionIdx < this.tempoRegions.length - 1) {
+      clamped = Math.min(clamped, this.totalDuration);
+    } else {
+      clamped = Math.min(clamped, this.tempoRegions[regionIdx + 1].userPoints[0].time - 0.1);
     }
     point.time = clamped;
     this.editPoints.updatePoint(id, { time: clamped });
@@ -446,7 +451,6 @@ function initPeaks(savedJson: string | undefined) {
       }
     });
     peaks.on("points.dragmove", (event) => {
-      zoomview.updateWaveform();
       if (event.point.id === undefined) {
         return;
       }

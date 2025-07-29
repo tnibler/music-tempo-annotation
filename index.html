@@ -8,17 +8,66 @@
   </head>
   <body >
     <header class="container">
-      <label for="file-input">Open audio file:</label>
-      <input type="file" id="file-input" accept="audio/*"/>
-      <button id="button-download">Download Annotations</button>
+      <hgroup>
+        <h1>Tempo and Beat Annotation</h1>
+      </hgroup>
     </header>
     <main>
-      <div id="zoomview-container"></div>
-      <div id="overview-container"></div>
-      <audio id="audio">
-        <source src="https://archive.org/download/r1291095-ANGERCD02-angerfist-mutilate/%5BANGERCD02%5D%202-02%20Angerfist%20-%20Back%20Up.mp3" type="audio/wav">
-      </audio>
+      <section class="container">
+        <form class="grid">
+          <group>
+            <label for="file-input">Open audio file:</label>
+            <input type="file" id="file-input" accept="audio/*"/>
+          </group>
+          <button id="button-download">Download Annotations</button>
+          <button id="button-delete-all" class="outline">Delete All Points</button>
+        </form>
+      </section>
+      <section class="container-fluid">
+        <div class="grid">
+          <div class="grid">
+            <button id="button-metronome" class="contrast" style="transition: none">Tap</button>
+            <button id="button-play">Play/Pause</button>
+          </div>
+          <article>
+            <div  id="region-overview">
+            </div>
+            <label for="checkbox-offbeat">
+              <input type="checkbox" id="checkbox-offbeat">
+              Marks are offbeats
+            </label>
+          </article>
+        </div>
+        <div id="zoomview-container"></div>
+        <div id="overview-container"></div>
+        <audio id="audio">
+          <source src="/royaltyfreetypebeat.opus">
+        </audio>
+      </section>
     </main>
+    <footer  class="container">
+      <div class="grid">
+        <ul>
+          <li><kbd>Space</kbd> to play/pause</li>
+          <li><kbd>Left click</kbd> to move the playhead</li>
+          <li><kbd>Scroll</kbd> to... scroll</li>
+          <li><kbd>Right click</kbd> to place a beat</li>
+          <li><kbd>Right click</kbd> it again to delete it</li>
+          <li><kbd>Ctrl</kbd>+<kbd>Right click</kbd> to mark a tempo change</li>
+        </ul>
+        <ul>
+          <li>
+          Placing two beats will calculate the tempo and show where following beats will land according to that tempo.
+          </li>
+          <li>
+          If the tempo changes at some point, mark it by placing a tempo change to end the previous constant tempo region.
+          </li>
+          <!-- <li> -->
+          <!-- In some cases, the offbeats (e.g., snare drum) are easier to identify, which will be noted in the resulting annotations. -->
+          <!-- </li> -->
+        </ul>
+      </div>
+    </footer>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

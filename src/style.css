@@ -1,12 +1,31 @@
 main {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  align-items: center;
+  /* display: flex; */
+  /* width: 100%; */
+  /* flex-direction: column; */
+  /* align-items: center; */
 }
 
 
 #zoomview-container, #overview-container {
-  width: 100%;
   height: 300px;
 }
+
+#button-metronome {
+  --pico-font-weight: 700;
+  font-size: 4rem;
+}
+
+#button-delete-all.confirm {
+  --pico-background-color: #F38F79;
+}
+
+/**/
+/* #button-metronome.tik { */
+/*   background-color: #dfdfdf; */
+/*   transition: none; */
+/* } */
+/**/
+/* #button-metronome.tok { */
+/*   background-color: #000000; */
+/*   transition: none; */
+/* } */

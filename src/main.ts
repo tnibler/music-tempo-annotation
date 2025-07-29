@@ -4,13 +4,14 @@ import './style.css'
 
 type PointKind = "beat" | "tempoChange";
 
-interface EditPoints {
+interface Controls {
   addPoint: (id: string, opts: { time: number, draggable: boolean, kind: PointKind }) => void;
   removePoint: (id: string) => void;
-  updatePoint: (id: string, opts: { time: number }) => void;
+  updatePoint: (id: string, opts: { time?: number | undefined, color?: string | undefined }) => void;
   addSegment: (id: string, opts: { startTime: number, endTime: number, editable: boolean, labelText: string, color: string }) => void;
   updateSegment: (id: string, opts: { startTime?: number | undefined, endTime?: number | undefined, editable?: boolean | undefined, labelText?: string | undefined, color?: string | undefined }) => void;
   removeSegment: (id: string) => void;
+  displayRegionInfo: (region: TempoRegion) => void;
 }
 
 
@@ -36,6 +37,11 @@ type TempoRegion = {
   userPoints: UserPoint[],
   autoPoints: AutoPoint[],
   segmentId: string | null,
+  beatPeriod: number | null,
+  bpmStddev: number | null,
+  // markedOffBeat: boolean,
+  endTime: number,
+  startError: number,
 }
 
 type SaveFile = {
@@ -46,20 +52,31 @@ type SaveFile = {
 
 class Annotate {
   totalDuration: number;
-  editPoints: EditPoints;
+  controls: Controls;
   tempoRegions: TempoRegion[];
   pointsById: Map<string, Point>;
   onChange: (self: Annotate) => void;
   currentUserId = 0;
   currentAutoId = 0;
   currentSegmentId = 0;
+  autoPointsVisibleRange: { start: number, end: number } = { start: 0, end: 0 };
+  viewport: { start: number, end: number } = { start: Infinity, end: -Infinity };
 
-  constructor(duration: number, points: EditPoints, onChange: (self: Annotate) => void) {
+  constructor(duration: number, points: Controls, onChange: (self: Annotate) => void) {
     this.totalDuration = duration;
-    this.editPoints = points;
+    this.controls = points;
     this.pointsById = new Map();
-    this.tempoRegions = [{ userPoints: [], autoPoints: [], segmentId: null }];
+    this.tempoRegions = [{
+      userPoints: [],
+      autoPoints: [],
+      segmentId: null,
+      beatPeriod: null,
+      bpmStddev: null,
+      endTime: duration,
+      startError: 0,
+    }];
     this.onChange = onChange;
+    this.controls.displayRegionInfo(this.tempoRegions[0]);
   }
 
   loadFromSaved(saved: SaveFile) {
@@ -85,6 +102,20 @@ class Annotate {
       beats: beats,
       regions: [],
     };
+  }
+
+  deleteAllPoints() {
+    this.pointsById = new Map();
+    this.tempoRegions = [{
+      userPoints: [],
+      autoPoints: [],
+      segmentId: null,
+      beatPeriod: null,
+      bpmStddev: null,
+      endTime: this.totalDuration,
+      startError: 0,
+    }];
+    this.controls.displayRegionInfo(this.tempoRegions[0]);
   }
 
   onAddPoint(time: number, kind: PointKind, doUpdate: boolean = true) {
@@ -114,29 +145,59 @@ class Annotate {
     while (insertAt < containingRegion.userPoints.length && containingRegion.userPoints[insertAt].time < time) {
       insertAt++;
     }
-    if (kind === 'tempoChange') {
+    const maxBpm = 300;
+    const minDist = (60 / maxBpm) / 2;
+    if (insertAt > 1) {
+      const dist = time - containingRegion.userPoints[insertAt - 1].time;
+      if (dist < minDist) {
+        return;
+      }
+    }
+    if (insertAt < containingRegion.userPoints.length) {
+      const dist = containingRegion.userPoints[insertAt].time - time;
+      if (dist < minDist) {
+        return;
+      }
+    }
+    let changedRegions: TempoRegion[] = [];
+    if (kind === 'tempoChange' && insertAt === 0) {
+      console.assert(containingRegionIdx === 0);
+      containingRegion.userPoints.splice(0, 0, point);
+      point.region = containingRegion;
+      changedRegions = [containingRegion];
+    } else if (kind === 'tempoChange') {
       const removedPoints = containingRegion.userPoints.splice(insertAt, containingRegion.userPoints.length - insertAt)
-      const newRegion: TempoRegion = { userPoints: [point].concat(removedPoints), autoPoints: [], segmentId: null };
+      const newRegion: TempoRegion = {
+        userPoints: [point].concat(removedPoints),
+        autoPoints: [],
+        segmentId: null,
+        endTime: containingRegion.endTime,
+        beatPeriod: null,
+        startError: 0,
+        bpmStddev: null,
+      };
       for (const point of newRegion.userPoints) {
         point.region = newRegion;
       }
+      containingRegion.endTime = time;
       this.tempoRegions.splice(containingRegionIdx + 1, 0, newRegion);
-      if (doUpdate) {
-        this.updateTempo(containingRegion);
-        this.updateTempo(newRegion);
-      }
+      changedRegions = [containingRegion, newRegion];
     } else {
       containingRegion = this.tempoRegions[containingRegionIdx];
       containingRegion.userPoints.splice(insertAt, 0, point)
-      if (doUpdate) {
-        this.updateTempo(containingRegion)
-      }
+      changedRegions = [containingRegion];
     }
 
-
-    this.editPoints.addPoint(point.id, { time, kind, draggable: true });
+    this.controls.addPoint(point.id, { time, kind, draggable: true });
     this.pointsById.set(point.id, point);
-    this.onChange(this);
+    if (doUpdate) {
+      for (const r of changedRegions) {
+        this.updateTempo(r);
+        this.drawAutoPointsInView(this.viewport.start, this.viewport.end, changedRegions);
+      }
+      this.controls.displayRegionInfo(point.region);
+      this.onChange(this);
+    }
   }
 
   onRemovePoint(id: string) {
@@ -146,11 +207,30 @@ class Annotate {
       return;
     }
     const region = point.region;
+    const regionIdx = this.tempoRegions.indexOf(region);
     const index = region.userPoints.indexOf(point);
-    region.userPoints.splice(index, 1);
-    this.pointsById.delete(id);
-    this.editPoints.removePoint(point.id);
-    this.updateTempo(region);
+    if (regionIdx > 0 && point.kind === 'tempoChange') {
+      console.assert(index === 0);
+      const previousRegion = this.tempoRegions[regionIdx - 1];
+      previousRegion.userPoints = previousRegion.userPoints.concat(region.userPoints.slice(1));
+      previousRegion.autoPoints = previousRegion.autoPoints.concat(region.autoPoints);
+      previousRegion.endTime = region.endTime;
+      if (region.segmentId !== null) {
+        this.controls.removeSegment(region.segmentId);
+      }
+      this.tempoRegions.splice(regionIdx, 1);
+      this.updateTempo(previousRegion);
+      this.controls.displayRegionInfo(previousRegion);
+      this.controls.removePoint(point.id);
+      this.drawAutoPointsInView(this.viewport.start, this.viewport.end, [previousRegion]);
+    } else {
+      region.userPoints.splice(index, 1);
+      this.pointsById.delete(id);
+      this.controls.removePoint(point.id);
+      this.updateTempo(region);
+      this.controls.displayRegionInfo(region);
+      this.drawAutoPointsInView(this.viewport.start, this.viewport.end, [region]);
+    }
     this.onChange(this);
   }
 
@@ -180,27 +260,30 @@ class Annotate {
       clamped = Math.min(clamped, this.totalDuration - 0.1);
     }
     point.time = clamped;
-    this.editPoints.updatePoint(id, { time: clamped });
+    this.controls.updatePoint(id, { time: clamped });
   }
 
   onPointMoved(id: string, toTime: number) {
     const point = this.pointsById.get(id);
     assertNotNull(point, 'point by id is null');
-    this.editPoints.updatePoint(id, { time: toTime });
+    this.controls.updatePoint(id, { time: toTime });
     this.updateTempo(point.region);
+    this.controls.displayRegionInfo(point.region);
+    this.drawAutoPointsInView(this.viewport.start, this.viewport.end, [point.region]);
     this.onChange(this);
   }
 
   updateTempo(region: TempoRegion) {
     const regionIdx = this.tempoRegions.indexOf(region);
     if (region.userPoints.length <= 1) {
+      region.beatPeriod = null;
       for (const ap of region.autoPoints) {
         this.pointsById.delete(ap.id);
-        this.editPoints.removePoint(ap.id);
+        this.controls.removePoint(ap.id);
       }
       region.autoPoints = [];
       if (region.segmentId !== null) {
-        this.editPoints.removeSegment(region.segmentId);
+        this.controls.removeSegment(region.segmentId);
         region.segmentId = null;
       }
       return;
@@ -215,13 +298,22 @@ class Annotate {
     }
 
     const initialEstimate = (() => {
+      let candidates = [];
       let sum = 0;
       let count = 0;
       for (const dist of dists) {
         if (dist < minDist * 1.2) {
-          sum += dist;
-          count += 1;
+          candidates.push(dist);
         }
+      }
+      candidates.sort();
+      if (candidates.length >= 5) {
+        const discard = Math.ceil(candidates.length * 0.2);
+        candidates = candidates.slice(discard, candidates.length - discard);
+      }
+      for (const dist of candidates) {
+        sum += dist;
+        count += 1;
       }
       console.assert(count >= 1);
       return sum / count;
@@ -238,7 +330,19 @@ class Annotate {
       return sum / count;
     })();
 
-    const stddev = (() => {
+    let sumErr = 0;
+    let count = 0;
+    for (let i = 1; i < region.userPoints.length; i++) {
+      const dist = (region.userPoints[i].time - region.userPoints[0].time)
+      let periods = Math.round(dist / period);
+      sumErr += (periods * period - dist);
+      count += 1;
+    }
+    const meanErr = sumErr / count;
+    // console.log(meanErr);
+
+
+    const bpmStddev = (() => {
       let sumSqDiff = 0;
       let meanTempo = 60 / period;
       let count = 0;
@@ -250,69 +354,232 @@ class Annotate {
       }
       return Math.sqrt(sumSqDiff / count);
     })();
+    region.beatPeriod = period;
+    region.bpmStddev = bpmStddev;
+    region.startError = meanErr;
 
-    let autoPointsPlaced = 0;
-    if (regionIdx != this.tempoRegions.length - 1) {
-      console.assert(this.tempoRegions[regionIdx + 1].userPoints[0].kind === 'tempoChange');
-    }
     const startTime = region.userPoints[0].time;
     const endTime = regionIdx === this.tempoRegions.length - 1 ? this.totalDuration : this.tempoRegions[regionIdx + 1].userPoints[0].time;
-    let userPointIdx = 0;
-    let t = startTime;
-    while (t + period < endTime && autoPointsPlaced < 10) {
-      const placeAutoPoint = (() => {
-        if (userPointIdx >= region.userPoints.length) {
-          if (regionIdx === this.tempoRegions.length - 1) {
-            // last region, no user points after this
-            return true;
-          } else {
-            const nextUserPoint = this.tempoRegions[regionIdx + 1].userPoints[0];
-            return Math.abs(t - nextUserPoint.time - period) / period > 0.1;
-          }
-        }
-        const nextUserPoint = region.userPoints[userPointIdx];
-        return Math.abs(t - nextUserPoint.time - period) / period > 0.1;
-      })();
-      if (!placeAutoPoint) {
-        userPointIdx += 1;
-      } else {
-        t += period;
-        if (autoPointsPlaced < region.autoPoints.length) {
-          const reusePoint = region.autoPoints[autoPointsPlaced];
-          reusePoint.time = t;
-          this.editPoints.updatePoint(reusePoint.id, { time: t });
-        } else {
-          const newPoint: AutoPoint = { id: this.nextAutoPointId(), region, time: t, kind: 'beat', userPlaced: false };
-          region.autoPoints.push(newPoint);
-          this.editPoints.addPoint(newPoint.id, { time: t, draggable: false, kind: 'beat' });
-          this.pointsById.set(newPoint.id, newPoint);
-        }
-        autoPointsPlaced += 1;
-      }
-    }
-    if (autoPointsPlaced < region.autoPoints.length) {
-      const toRemove = region.autoPoints.splice(autoPointsPlaced, region.autoPoints.length - autoPointsPlaced);
-      for (const ap of toRemove) {
-        this.pointsById.delete(ap.id);
-        this.editPoints.removePoint(ap.id);
-      }
-    }
     const segmentColors = ["#E11845", "#87E911", "#0057E9", "#FF00BD", "#F2CA19", "#8931EF"];
     const segmentOpts = {
       startTime,
       endTime,
-      labelText: (60 / period).toFixed(2) + " BPM (σ=" + stddev.toFixed(3) + ")",
+      labelText: (60 / period).toFixed(2) + " BPM (σ=" + bpmStddev.toFixed(3) + ")",
     };
     if (region.segmentId !== null) {
-      this.editPoints.updateSegment(region.segmentId, segmentOpts);
+      this.controls.updateSegment(region.segmentId, segmentOpts);
     } else {
       region.segmentId = this.nextSegmentId();
-      this.editPoints.addSegment(region.segmentId, {
+      this.controls.addSegment(region.segmentId, {
         ...segmentOpts,
         editable: false,
         color: segmentColors[this.currentSegmentId % segmentColors.length]
       });
     }
+  }
+
+  viewportChanged(startTime: number, endTime: number) {
+    this.viewport = { start: startTime, end: endTime };
+    this.drawAutoPointsInView(startTime, endTime);
+  }
+
+  onSegmentEntered(segmentId: string) {
+    const region = this.tempoRegions.find((r) => r.segmentId === segmentId);
+    if (region === undefined) {
+      console.error("entered segment that doesn't belong to any region");
+      return;
+    }
+    this.controls.displayRegionInfo(region);
+  }
+
+  drawAutoPointsInView(viewStart: number, viewEnd: number, changedRegions: TempoRegion[] = []) {
+    const minBuffer = 60;
+    if (changedRegions.length === 0 && this.autoPointsVisibleRange.start < viewStart - minBuffer && viewEnd + minBuffer < this.autoPointsVisibleRange.end) {
+      // nothing to do
+      return;
+    }
+    if (this.tempoRegions.length === 1 && this.tempoRegions[0].userPoints.length === 0) {
+      return;
+    }
+    const drawBuffer = 180;
+    const drawStart = Math.max(viewStart - drawBuffer, 0);
+    const drawEnd = Math.min(viewEnd + drawBuffer, this.totalDuration);
+    const regionsInView = this.tempoRegions.filter((r, i) => {
+      if (r.userPoints.length <= 1) {
+        return false;
+      }
+      const regStart = r.userPoints[0].time;
+      const regEnd = (i < this.tempoRegions.length - 1) ? this.tempoRegions[i + 1].userPoints[0].time : this.totalDuration;
+      return drawStart <= regEnd && regStart < drawEnd;
+    });
+    for (const region of regionsInView) {
+      console.assert(isSortedAscending(region.autoPoints, (p) => p.time));
+      console.assert(isSortedAscending(region.userPoints, (p) => p.time));
+      if (region.beatPeriod === null) {
+        continue;
+      }
+
+      const mergeDistance = Math.max(0.1 * region.beatPeriod, 0.1);
+      console.assert(mergeDistance > 0);
+
+      const regionIndex = this.tempoRegions.indexOf(region);
+      const regionEnd = (regionIndex < this.tempoRegions.length - 1) ? this.tempoRegions[regionIndex + 1].userPoints[0].time : this.totalDuration;
+      if (region.userPoints.length === 0) {
+        for (const ap of region.autoPoints) {
+          this.pointsById.delete(ap.id);
+          this.controls.removePoint(ap.id);
+        }
+        region.autoPoints = [];
+      } else if (changedRegions.indexOf(region) >= 0) {
+        // recompute all points
+        assertNotNull(region.beatPeriod, "region");
+        if (60 / region.beatPeriod > 350) {
+          return;
+        }
+
+        const startTime = region.userPoints[0].time - region.startError;
+        const firstBeatToDraw = startTime + ((startTime >= drawStart) ? 0 : (region.beatPeriod * Math.ceil((drawStart - startTime) / region.beatPeriod)));
+
+        // keep track of the closest user placed point, if it's very close don't place an auto point
+        let closestUserPoint = 0
+
+        let pointsPlaced = 0;
+        for (let t = firstBeatToDraw; t < Math.min(regionEnd, drawEnd); t += region.beatPeriod) {
+          let placeAutoPoint = true;
+
+          if (closestUserPoint <= region.userPoints.length) {
+            let dist;
+            do {
+              if (closestUserPoint < region.userPoints.length) {
+                dist = region.userPoints[closestUserPoint].time - t;
+              } else if (regionIndex < this.tempoRegions.length - 1) {
+                console.assert(this.tempoRegions[regionIndex + 1].userPoints.length > 0);
+                dist = region.userPoints[0].time - t;
+              } else {
+                dist = Infinity;
+              }
+              if (dist < -mergeDistance) {
+                closestUserPoint += 1;
+              } else if (dist < mergeDistance) {
+                placeAutoPoint = false;
+                break;
+              } else {
+                break;
+              }
+            } while (dist < -mergeDistance && closestUserPoint <= region.userPoints.length)
+          }
+          if (placeAutoPoint) {
+            if (pointsPlaced < region.autoPoints.length) {
+              const reusePoint = region.autoPoints[pointsPlaced];
+              reusePoint.time = t;
+              this.controls.updatePoint(reusePoint.id, { time: t });
+            } else {
+              const newPoint: AutoPoint = { id: this.nextAutoPointId(), region, time: t, kind: 'beat', userPlaced: false };
+              region.autoPoints.push(newPoint);
+              this.controls.addPoint(newPoint.id, { time: t, draggable: false, kind: 'beat' });
+              this.pointsById.set(newPoint.id, newPoint);
+            }
+            pointsPlaced += 1;
+          }
+        }
+        if (pointsPlaced < region.autoPoints.length) {
+          const toRemove = region.autoPoints.splice(pointsPlaced, region.autoPoints.length - pointsPlaced);
+          for (const ap of toRemove) {
+            this.pointsById.delete(ap.id);
+            this.controls.removePoint(ap.id);
+          }
+        }
+      } else {
+        assertNotNull(region.beatPeriod, "region.beatPeriod is null even though it has >1 points");
+        // remove autopoints not in viewrange
+        let lastInvisibleIndex = region.autoPoints.findLastIndex((p) => p.time < drawStart);
+        let firstInvisibleIndex = region.autoPoints.findIndex((p) => p.time > drawEnd);
+        let recyclePoints: AutoPoint[] = [];
+        let recycleIndex = 0;
+        if (lastInvisibleIndex >= 0) {
+          recyclePoints = region.autoPoints.splice(0, lastInvisibleIndex + 1);
+        }
+        if (firstInvisibleIndex >= 0) {
+          const offset = lastInvisibleIndex + 1; // removed this many from the front. works out bc findLastIndex returns -1 if there weren't any 
+          const removeBack = region.autoPoints.splice(firstInvisibleIndex + offset, region.autoPoints.length - (firstInvisibleIndex - offset));
+          recyclePoints = recyclePoints.concat(removeBack);
+        }
+        let pointsPlaced = 0;
+
+        const startTime = region.userPoints[0].time;
+        const firstBeatToDraw = startTime + ((startTime >= drawStart) ? 0 : (region.beatPeriod * Math.ceil((drawStart - startTime) / region.beatPeriod)));
+
+        let closestUserPoint = 0;
+        let prependPoints = [];
+        let appendPoints = [];
+        for (let t = firstBeatToDraw; t < Math.min(drawEnd, regionEnd); t += region.beatPeriod) {
+          let placeAutoPoint = true;
+          if (closestUserPoint <= region.userPoints.length) {
+            let dist;
+            do {
+              if (closestUserPoint < region.userPoints.length) {
+                dist = region.userPoints[closestUserPoint].time - t;
+              } else if (regionIndex < this.tempoRegions.length - 1) {
+                dist = region.userPoints[0].time - t;
+              } else {
+                dist = Infinity;
+              }
+              if (dist < -mergeDistance) {
+                closestUserPoint += 1;
+              } else if (dist < mergeDistance) {
+                placeAutoPoint = false;
+                break;
+              } else {
+                break;
+              }
+            } while (dist < -mergeDistance && closestUserPoint <= region.userPoints.length)
+          }
+          if (!placeAutoPoint || region.autoPoints.length > 0 && region.autoPoints[0].time <= t && t <= region.autoPoints[region.autoPoints.length - 1].time) {
+            continue;
+          }
+          if (region.autoPoints.length === 0 || t < region.autoPoints[0].time) {
+            // prepend
+            if (recycleIndex < recyclePoints.length) {
+              const reusePoint = recyclePoints[recycleIndex];
+              recycleIndex += 1;
+              reusePoint.time = t;
+              this.controls.updatePoint(reusePoint.id, { time: t });
+              prependPoints.push(reusePoint);
+            } else {
+              const newPoint: AutoPoint = { id: this.nextAutoPointId(), region, time: t, kind: 'beat', userPlaced: false };
+              this.controls.addPoint(newPoint.id, { time: t, draggable: false, kind: 'beat' });
+              this.pointsById.set(newPoint.id, newPoint);
+              prependPoints.push(newPoint);
+            }
+            pointsPlaced += 1;
+          } else {
+            // append
+            if (recycleIndex < recyclePoints.length) {
+              const reusePoint = recyclePoints[recycleIndex];
+              recycleIndex += 1;
+              reusePoint.time = t;
+              this.controls.updatePoint(reusePoint.id, { time: t });
+              appendPoints.push(reusePoint);
+            } else {
+              const newPoint: AutoPoint = { id: this.nextAutoPointId(), region, time: t, kind: 'beat', userPlaced: false };
+              this.controls.addPoint(newPoint.id, { time: t, draggable: false, kind: 'beat' });
+              this.pointsById.set(newPoint.id, newPoint);
+              appendPoints.push(newPoint);
+            }
+          }
+        }
+
+        if (recycleIndex < recyclePoints.length) {
+          for (let i = recycleIndex; i < recyclePoints.length; i++) {
+            this.pointsById.delete(recyclePoints[i].id);
+            this.controls.removePoint(recyclePoints[i].id);
+          }
+        }
+        region.autoPoints = prependPoints.concat(region.autoPoints, appendPoints);
+      }
+    }
+
+    this.autoPointsVisibleRange = { start: drawStart, end: drawEnd };
   }
 
   nextSegmentId(): string {
@@ -332,7 +599,21 @@ class Annotate {
     this.currentAutoId += 1;
     return id;
   }
+}
 
+function isSortedAscending<T>(arr: T[], key: (t: T) => number): boolean {
+  if (arr.length === 0) {
+    return true;
+  }
+  let prev = key(arr[0]);
+  for (let i = 1; i < arr.length; i += 1) {
+    const t = key(arr[i]);
+    if (prev > t) {
+      return false;
+    }
+    prev = t;
+  }
+  return true;
 }
 
 function assertNotNull<T>(value: T, message: string): asserts value is NonNullable<T> {
@@ -347,17 +628,27 @@ const overviewEl = document.getElementById('overview-container');
 assertNotNull(overviewEl, "overviewEl is null");
 const audioEl = document.getElementsByTagName("audio").namedItem("audio");
 assertNotNull(audioEl, "audioEl is null");
+audioEl.addEventListener("error", (e) => {
+  console.error(e);
+});
+const tapButton = document.getElementById("button-metronome");
+assertNotNull(tapButton, "button-metronome is null");
 
 const zoomLevels = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32].map((i) => i * 128);
 const options: PeaksOptions = {
   keyboard: true,
   zoomview: {
     container: zoomviewEl,
+    playheadWidth: 2,
+    showPlayheadTime: true,
   },
   zoomLevels,
   overview: {
     container: overviewEl,
+    showPlayheadTime: true,
+    enablePoints: false,
   },
+  emitCueEvents: true,
   segmentOptions: {
     markers: false,
     overlay: true,
@@ -379,7 +670,15 @@ const options: PeaksOptions = {
   }
 };
 
-let peaksEvents: { keypress: (e: KeyboardEvent) => void; wheel: (e: WheelEvent) => void; resize: () => void; download: () => void; } | null = null;
+let peaksEvents: {
+  keypress: (e: KeyboardEvent) => void;
+  wheel: (e: WheelEvent) => void;
+  resize: () => void;
+  download: () => void;
+  tap: () => void;
+  playPause: () => void;
+  clearAllPoints: () => void;
+} | null = null;
 
 function initPeaks(savedJson: string | undefined) {
   Peaks.init(options, function(err, peaks) {
@@ -407,6 +706,8 @@ function initPeaks(savedJson: string | undefined) {
       };
       window.localStorage[filename] = JSON.stringify(save);
     };
+    const regionOverviewEl = document.getElementById("region-overview");
+    assertNotNull(regionOverviewEl, "regionOverviewEl is null");
     const annotate = new Annotate(peaks.player.getDuration(), {
       addPoint: (id, { time, kind, draggable }) => {
         const color = kind === 'beat' ? '#006eb0' : '#ff0000';
@@ -415,10 +716,10 @@ function initPeaks(savedJson: string | undefined) {
       removePoint: (id) => {
         peaks.points.removeById(id);
       },
-      updatePoint: (id, { time }) => {
+      updatePoint: (id, opts) => {
         const point = peaks.points.getPoint(id);
         assertNotNull(point, 'point by id is null');
-        point.update({ time });
+        point.update(opts);
       },
       addSegment: (id, opts) => {
         peaks.segments.add({
@@ -444,6 +745,9 @@ function initPeaks(savedJson: string | undefined) {
           }
         }
       },
+      displayRegionInfo: (region) => {
+        showRegionOverview(region, regionOverviewEl);
+      },
       removeSegment: (id) => {
         peaks.segments.removeById(id);
       },
@@ -452,6 +756,13 @@ function initPeaks(savedJson: string | undefined) {
       annotate.loadFromSaved(JSON.parse(savedJson));
     }
 
+    let tik = true;
+    assertNotNull(tapButton, "button-metronome is null");
+    tapButton.classList = tik ? "secondary" : "secondary outline";
+    peaks.on("points.enter", (e) => {
+      tik = !tik;
+      tapButton.classList = tik ? "secondary" : "secondary outline";
+    });
     zoomview.setWheelMode("scroll", { captureVerticalScroll: true });
     zoomview.setWaveformDragMode("scroll");
     peaks.on("zoomview.contextmenu", (ev) => {
@@ -474,7 +785,7 @@ function initPeaks(savedJson: string | undefined) {
         return;
       }
       annotate.onPointMoved(event.point.id, event.point.time);
-    });
+    })
 
     peaks.on("points.click", (event) => {
       event.preventViewEvent();
@@ -490,9 +801,29 @@ function initPeaks(savedJson: string | undefined) {
     peaks.on("player.pause", (e) => {
       isPlaying = false;
     });
+    peaks.on("zoomview.update", (e) => {
+      annotate.viewportChanged(e.startTime, e.endTime);
+    });
+    peaks.on("segments.enter", (e) => {
+      if (e.segment.id !== undefined) {
+        annotate.onSegmentEntered(e.segment.id);
+      }
+    });
     peaksEvents = {
+      tap: () => {
+        annotate.onAddPoint(peaks.player.getCurrentTime(), 'beat');
+      },
+      playPause: () => {
+        if (isPlaying) {
+          peaks.player.pause();
+        } else {
+          peaks.player.play();
+        }
+      },
       keypress: (event: KeyboardEvent) => {
         if (event.key == " ") {
+          event.preventDefault();
+          event.stopPropagation();
           if (isPlaying) {
             peaks.player.pause();
           } else {
@@ -539,7 +870,12 @@ function initPeaks(savedJson: string | undefined) {
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-      }
+      },
+      clearAllPoints: () => {
+        annotate.deleteAllPoints();
+        peaks.points.removeAll();
+        peaks.segments.removeAll();
+      },
     };
   });
 }
@@ -580,6 +916,9 @@ function loadFile(file: File) {
 }
 
 const input: HTMLInputElement = document.getElementById("file-input") as HTMLInputElement;
+input.addEventListener("keyup", (e) => {
+  e.preventDefault();
+})
 input.addEventListener("change", (e) => {
   if (input.files !== null && input.files.length > 0) {
     const file = input.files[0];
@@ -592,6 +931,44 @@ document.getElementById('button-download')?.addEventListener("click", (e) => {
     peaksEvents.download();
   }
 });
+document.getElementById('button-play')?.addEventListener("click", (e) => {
+  if (peaksEvents !== null) {
+    peaksEvents.playPause();
+  }
+});
+
+const buttonDelete = document.getElementById("button-delete-all");
+assertNotNull(buttonDelete, "buttonDelete is null");
+let confirmingClear = false;
+const deleteText = buttonDelete.innerHTML;
+buttonDelete.addEventListener("click", (e) => {
+  if (confirmingClear) {
+    buttonDelete.innerHTML = deleteText;
+    buttonDelete.classList.remove("confirm");
+    buttonDelete.classList.add("outline");
+    confirmingClear = false;
+    if (peaksEvents !== null) {
+      peaksEvents.clearAllPoints();
+    }
+  } else {
+    buttonDelete.innerHTML = "Confirm to clear all points";
+    confirmingClear = true;
+    buttonDelete.classList.add("confirm");
+    buttonDelete.classList.remove("outline");
+    setTimeout(() => {
+      confirmingClear = false;
+      buttonDelete.innerHTML = deleteText;
+      buttonDelete.classList.remove("confirm");
+      buttonDelete.classList.add("outline");
+    }, 5000);
+  }
+});
+
+tapButton.addEventListener("click", (e) => {
+  if (peaksEvents !== null) {
+    peaksEvents.tap();
+  }
+})
 
 let currentFile: File | null = null;
 if (input.files !== null && input.files.length > 0) {
@@ -600,6 +977,21 @@ if (input.files !== null && input.files.length > 0) {
   initPeaks(window.localStorage['sample']);
 }
 
-
-// TODO: move markers hangs, 
-// TODO: remove event listeners on reinit peaks
+function showRegionOverview(region: TempoRegion, divEl: HTMLElement) {
+  const startTime = region.userPoints.length > 0 ? region.userPoints[0].time : 0;
+  const startStr = new Date(1000 * startTime).toISOString().substring(11, 19)
+  const endStr = new Date(1000 * region.endTime).toISOString().substring(11, 19)
+  const bpm = region.beatPeriod ? (60 / region.beatPeriod).toFixed(3) : "-";
+  const stddev = region.bpmStddev?.toFixed(3) ?? "-";
+  const html = `
+            <h2>Tempo region:</h2>
+            <div  id="region-overview">
+              <ul>
+                <li>${startStr}-${endStr}</li>
+                <li>${bpm} bpm (stddev ${stddev})</li>
+                <li>${region.userPoints.length} marked beats</li>
+              </ul>
+            </div>
+`;
+  divEl.innerHTML = html;
+}

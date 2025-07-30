@@ -20,6 +20,7 @@
             nodePackages.npm
             nodePackages.typescript
             nodePackages.typescript-language-server
+            nodePackages.svelte-language-server
           ];
         };
       }

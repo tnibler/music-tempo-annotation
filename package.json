@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "konva": "^9.3.22",
-    "peaks.js": "bbc/peaks.js#dab5907ecc3f645efbd3df12a9bb973b028d5b8f",
+    "peaks.js": "tnibler/peaks.js#npm-prepare",
     "waveform-data": "^4.5.2"
   }
 }

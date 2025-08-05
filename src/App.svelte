@@ -369,7 +369,7 @@
       </article>
     </div>
     <audio bind:this={audioEl} id="audio">
-      <source src="/royaltyfreetypebeat.opus" />
+      <source src="/music-tempo-annotation/royaltyfreetypebeat.opus" />
     </audio>
     <Peaks
       bind:this={peaks}

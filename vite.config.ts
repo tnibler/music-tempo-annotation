@@ -5,4 +5,5 @@ import UnpluginTypia from "@ryoppippi/unplugin-typia/vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [svelte(), UnpluginTypia({})],
+  base: "/music-tempo-annotation/",
 });
